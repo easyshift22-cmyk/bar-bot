@@ -21,7 +21,7 @@ DB_CONFIG = {
 }
 
 PASSWORD = "EasyShift123"
-active_sessions = set() # Список ID админов в памяти
+active_sessions = set()
 
 def get_db_connection():
     try:
@@ -31,7 +31,7 @@ def get_db_connection():
         print(f"Ошибка подключения к БД: {e}")
         return None
 
-# --- ЛОГИКА МОНИТОРИНГА ЗАКАЗОВ ---
+# --- ЛОГИКА МОНИТОРИНГА НОВЫХ ЗАКАЗОВ ---
 def check_new_orders():
     conn = get_db_connection()
     if not conn:
@@ -39,7 +39,6 @@ def check_new_orders():
 
     try:
         cursor = conn.cursor(dictionary=True)
-        # Тянем заказ, имя коктейля и все ингредиенты
         query = """
             SELECT o.order_id, c.name as cocktail_name, o.quantity, o.comment,
                    i.ing_1, i.qty_1, i.ing_2, i.qty_2, i.ing_3, i.qty_3,
@@ -53,7 +52,6 @@ def check_new_orders():
         new_orders = cursor.fetchall()
 
         for order in new_orders:
-            # Сборка состава
             ingredients = []
             for num in range(1, 7):
                 name = order.get(f'ing_{num}')
@@ -63,7 +61,6 @@ def check_new_orders():
             
             ing_text = "\n".join(ingredients) if ingredients else "  Состав не указан"
 
-            # Текст уведомления
             msg_text = (
                 f"🆕 НОВЫЙ ЗАКАЗ №{order['order_id']}\n"
                 f"━━━━━━━━━━━━━━\n"
@@ -74,20 +71,20 @@ def check_new_orders():
                 f"📜 СОСТАВ:\n{ing_text}"
             )
 
-            markup = types.InlineKeyboardMarkup()
+            # Кнопки при первом появлении заказа
+            markup = types.InlineKeyboardMarkup(row_width=2)
             markup.add(
+                types.InlineKeyboardButton("👨‍🍳 В процессе", callback_data=f"cook_{order['order_id']}"),
                 types.InlineKeyboardButton("✅ Готово", callback_data=f"done_{order['order_id']}"),
                 types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_{order['order_id']}")
             )
 
-            # Рассылка всем авторизованным
             for admin_id in list(active_sessions):
                 try:
                     bot.send_message(admin_id, msg_text, reply_markup=markup)
                 except:
                     pass
 
-            # Помечаем в базе, что уведомление отправлено
             cursor.execute("UPDATE Orders SET is_notified = 1 WHERE order_id = %s", (order['order_id'],))
         
         conn.commit()
@@ -98,90 +95,134 @@ def check_new_orders():
             cursor.close()
             conn.close()
 
-# --- ОБРАБОТЧИКИ КНОПОК ---
+# --- ОБРАБОТЧИКИ КНОПОК ДЕЙСТВИЯ ---
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith(('done_', 'cancel_')))
+@bot.callback_query_handler(func=lambda call: call.data.startswith(('done_', 'cancel_', 'cook_')))
 def handle_order_action(call):
-    action, order_id = call.data.split('_')
+    data = call.data.split('_')
+    action, order_id = data[0], data[1]
     
-    # Имя админа
     user_name = call.from_user.first_name + (f" {call.from_user.last_name}" if call.from_user.last_name else "")
     
-    db_status = 'ready' if action == 'done' else 'cancelled'
-    status_display = "✅ Выполнен" if action == "done" else "❌ Отменен"
-    status_line = f"\n\nСтатус: {status_display} ({user_name})"
+    status_map = {
+        'done': ('ready', '✅ Выполнен'),
+        'cancel': ('cancelled', '❌ Отменен'),
+        'cook': ('cooking', '👨‍🍳 В процессе')
+    }
+    db_status, display_status = status_map[action]
     
-    # Обновляем БД
+    # 1. Запись в БД
     conn = get_db_connection()
     if conn:
         try:
             cursor = conn.cursor()
-            cursor.execute("UPDATE Orders SET status = %s WHERE order_id = %s", (db_status, order_id))
+            query = "UPDATE Orders SET status = %s, worker_name = %s WHERE order_id = %s"
+            cursor.execute(query, (db_status, user_name, order_id))
             conn.commit()
         finally:
             conn.close()
 
-    markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("⬅️ Вернуть в список (Назад)", callback_data=f"reset_{order_id}"))
+    # 2. Обновление кнопок в зависимости от действия
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    if action == 'cook':
+        markup.add(
+            types.InlineKeyboardButton("✅ Готово", callback_data=f"done_{order_id}"),
+            types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_{order_id}"),
+            types.InlineKeyboardButton("🔄 Обновить", callback_data=f"refresh_{order_id}")
+        )
+    else:
+        markup.add(
+            types.InlineKeyboardButton("⬅️ Назад", callback_data=f"reset_{order_id}"),
+            types.InlineKeyboardButton("🔄 Обновить", callback_data=f"refresh_{order_id}")
+        )
+    
+    status_line = f"\n\nСтатус: {display_status} ({user_name})"
+    clean_text = call.message.text.split("\n\nСтатус:")[0]
+    
+    bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, 
+                          text=clean_text + status_line, reply_markup=markup)
 
-    # Редактируем сообщение (без parse_mode во избежание ошибок спецсимволов)
-    bot.edit_message_text(
-        chat_id=call.message.chat.id,
-        message_id=call.message.message_id,
-        text=call.message.text + status_line,
-        reply_markup=markup
-    )
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('reset_'))
-def handle_reset_order(call):
+# --- КНОПКА "ОБНОВИТЬ" (Проверка статуса из БД) ---
+@bot.callback_query_handler(func=lambda call: call.data.startswith('refresh_'))
+def handle_refresh(call):
     order_id = call.data.split('_')[1]
     
     conn = get_db_connection()
     if conn:
         try:
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute("SELECT status, worker_name FROM Orders WHERE order_id = %s", (order_id,))
+            order_data = cursor.fetchone()
+            
+            if order_data:
+                labels = {'new': '🆕 Ожидает', 'cooking': '👨‍🍳 В процессе', 'ready': '✅ Выполнен', 'cancelled': '❌ Отменен'}
+                cur_status = labels.get(order_data['status'], order_data['status'])
+                worker = order_data['worker_name'] or "Никто"
+                
+                status_line = f"\n\nСтатус: {cur_status} ({worker})"
+                new_text = call.message.text.split("\n\nСтатус:")[0] + status_line
+                
+                if new_text == call.message.text:
+                    bot.answer_callback_query(call.id, "Изменений нет")
+                else:
+                    # Динамически меняем кнопки при обновлении
+                    markup = types.InlineKeyboardMarkup(row_width=2)
+                    if order_data['status'] == 'cooking':
+                        markup.add(types.InlineKeyboardButton("✅ Готово", callback_data=f"done_{order_id}"),
+                                   types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_{order_id}"),
+                                   types.InlineKeyboardButton("🔄 Обновить", callback_data=f"refresh_{order_id}"))
+                    elif order_data['status'] in ['ready', 'cancelled']:
+                        markup.add(types.InlineKeyboardButton("⬅️ Назад", callback_data=f"reset_{order_id}"),
+                                   types.InlineKeyboardButton("🔄 Обновить", callback_data=f"refresh_{order_id}"))
+                    else: # 'new'
+                        markup.add(types.InlineKeyboardButton("👨‍🍳 В процессе", callback_data=f"cook_{order_id}"),
+                                   types.InlineKeyboardButton("✅ Готово", callback_data=f"done_{order_id}"),
+                                   types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_{order_id}"))
+
+                    bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, 
+                                          text=new_text, reply_markup=markup)
+                    bot.answer_callback_query(call.id, "Статус обновлен!")
+        finally:
+            conn.close()
+
+# --- КНОПКА "НАЗАД" ---
+@bot.callback_query_handler(func=lambda call: call.data.startswith('reset_'))
+def handle_reset_order(call):
+    order_id = call.data.split('_')[1]
+    conn = get_db_connection()
+    if conn:
+        try:
             cursor = conn.cursor()
-            cursor.execute("UPDATE Orders SET status = 'new' WHERE order_id = %s", (order_id,))
+            cursor.execute("UPDATE Orders SET status = 'new', worker_name = NULL WHERE order_id = %s", (order_id,))
             conn.commit()
         finally:
             conn.close()
 
-    markup = types.InlineKeyboardMarkup()
+    markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
+        types.InlineKeyboardButton("👨‍🍳 В процессе", callback_data=f"cook_{order_id}"),
         types.InlineKeyboardButton("✅ Готово", callback_data=f"done_{order_id}"),
         types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_{order_id}")
     )
+    bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, 
+                          text=call.message.text.split("\n\nСтатус:")[0], reply_markup=markup)
 
-    # Убираем приписку статуса
-    original_text = call.message.text.split("\n\nСтатус:")[0]
-
-    bot.edit_message_text(
-        chat_id=call.message.chat.id,
-        message_id=call.message.message_id,
-        text=original_text,
-        reply_markup=markup
-    )
-
-# --- АВТОРИЗАЦИЯ ---
-
+# --- АВТОРИЗАЦИЯ И ЗАПУСК ---
 @bot.message_handler(commands=['start'])
 def start(message):
-    bot.send_message(message.chat.id, "👋 Привет! Введите пароль для доступа к заказам:")
+    bot.send_message(message.chat.id, "👋 Привет! Введите пароль:")
 
 @bot.message_handler(func=lambda message: message.text == PASSWORD)
 def auth(message):
     active_sessions.add(message.chat.id)
-    bot.send_message(message.chat.id, "🔓 Доступ разрешен! Теперь вы будете получать новые заказы.")
-
-# --- ЗАПУСК ---
+    bot.send_message(message.chat.id, "🔓 Доступ открыт! Ожидайте заказы.")
 
 def run_db_monitor():
     while True:
         check_new_orders()
-        time.sleep(5) # Проверка каждые 5 секунд
+        time.sleep(5)
 
 if __name__ == '__main__':
-    print("Бот успешно запущен и мониторит базу...")
-    # Запускаем мониторинг в отдельном потоке
+    print("Бот запущен...")
     threading.Thread(target=run_db_monitor, daemon=True).start()
-    # Запускаем самого бота
     bot.polling(none_stop=True)
