@@ -1,11 +1,12 @@
 import telebot
 import mysql.connector
 import time
+import threading
 from telebot import types
 from mysql.connector import Error
 
-# Настройки бота и базы данных
-TOKEN = '8285671558:AAHsrgoANT0OjE4yy1G_frBktvkkdUauT-Y'  # Замени на актуальный токен
+# --- НАСТРОЙКИ ---
+TOKEN = '8285671558:AAHsrgoANT0OjE4yy1G_frBktvkkdUauT-Y' 
 bot = telebot.TeleBot(TOKEN)
 
 DB_CONFIG = {
@@ -20,7 +21,7 @@ DB_CONFIG = {
 }
 
 PASSWORD = "EasyShift123"
-active_sessions = set()
+active_sessions = set() # Список ID админов в памяти
 
 def get_db_connection():
     try:
@@ -30,7 +31,7 @@ def get_db_connection():
         print(f"Ошибка подключения к БД: {e}")
         return None
 
-# Проверка новых заказов
+# --- ЛОГИКА МОНИТОРИНГА ЗАКАЗОВ ---
 def check_new_orders():
     conn = get_db_connection()
     if not conn:
@@ -38,7 +39,7 @@ def check_new_orders():
 
     try:
         cursor = conn.cursor(dictionary=True)
-        # Запрос тянет данные заказа + название коктейля + все ингредиенты
+        # Тянем заказ, имя коктейля и все ингредиенты
         query = """
             SELECT o.order_id, c.name as cocktail_name, o.quantity, o.comment,
                    i.ing_1, i.qty_1, i.ing_2, i.qty_2, i.ing_3, i.qty_3,
@@ -52,150 +53,135 @@ def check_new_orders():
         new_orders = cursor.fetchall()
 
         for order in new_orders:
-            # Формируем список ингредиентов (пропускаем пустые)
+            # Сборка состава
             ingredients = []
             for num in range(1, 7):
-                ing_name = order.get(f'ing_{num}')
-                ing_qty = order.get(f'qty_{num}')
-                if ing_name and ing_name.strip():
-                    ingredients.append(f"  🔹 {ing_name}: {ing_qty}")
+                name = order.get(f'ing_{num}')
+                qty = order.get(f'qty_{num}')
+                if name and name.strip():
+                    ingredients.append(f"  🔹 {name}: {qty}")
             
-            ingredients_text = "\n".join(ingredients) if ingredients else "  Нет данных о составе"
+            ing_text = "\n".join(ingredients) if ingredients else "  Состав не указан"
 
-            # Текст сообщения
+            # Текст уведомления
             msg_text = (
-                f"🆕 **НОВЫЙ ЗАКАЗ №{order['order_id']}**\n"
+                f"🆕 НОВЫЙ ЗАКАЗ №{order['order_id']}\n"
                 f"━━━━━━━━━━━━━━\n"
-                f"🍸 **Коктейль:** {order['cocktail_name']}\n"
-                f"🔢 **Количество:** {order['quantity']}\n"
-                f"💬 **Коммент:** {order['comment'] if order['comment'] else '---'}\n"
+                f"🍸 Коктейль: {order['cocktail_name']}\n"
+                f"🔢 Количество: {order['quantity']}\n"
+                f"💬 Коммент: {order['comment'] if order['comment'] else '---'}\n"
                 f"━━━━━━━━━━━━━━\n"
-                f"📜 **СОСТАВ:**\n{ingredients_text}"
+                f"📜 СОСТАВ:\n{ing_text}"
             )
 
-            # Клавиатура управления
             markup = types.InlineKeyboardMarkup()
-            btn_done = types.InlineKeyboardButton("✅ Готово", callback_data=f"done_{order['order_id']}")
-            btn_cancel = types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_{order['order_id']}")
-            markup.add(btn_done, btn_cancel)
+            markup.add(
+                types.InlineKeyboardButton("✅ Готово", callback_data=f"done_{order['order_id']}"),
+                types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_{order['order_id']}")
+            )
 
-            # Отправка всем активным админам
-            for admin_id in active_sessions:
+            # Рассылка всем авторизованным
+            for admin_id in list(active_sessions):
                 try:
-                    bot.send_message(admin_id, msg_text, reply_markup=markup, parse_mode="Markdown")
-                except Exception as e:
-                    print(f"Не удалось отправить сообщение {admin_id}: {e}")
+                    bot.send_message(admin_id, msg_text, reply_markup=markup)
+                except:
+                    pass
 
-            # Помечаем как уведомленный
+            # Помечаем в базе, что уведомление отправлено
             cursor.execute("UPDATE Orders SET is_notified = 1 WHERE order_id = %s", (order['order_id'],))
         
         conn.commit()
     except Error as e:
-        print(f"Ошибка при работе с БД: {e}")
+        print(f"Ошибка мониторинга: {e}")
     finally:
-        cursor.close()
-        conn.close()
+        if conn.is_connected():
+            cursor.close()
+            conn.close()
 
-# Обработчик кнопок Готово/Отмена
+# --- ОБРАБОТЧИКИ КНОПОК ---
+
 @bot.callback_query_handler(func=lambda call: call.data.startswith(('done_', 'cancel_')))
 def handle_order_action(call):
     action, order_id = call.data.split('_')
     
-    # Имя для Telegram (оставляем для красоты в чате)
-    user_name = call.from_user.first_name
-    if call.from_user.last_name:
-        user_name += f" {call.from_user.last_name}"
+    # Имя админа
+    user_name = call.from_user.first_name + (f" {call.from_user.last_name}" if call.from_user.last_name else "")
     
-    # Определяем значение ДЛЯ БАЗЫ (согласно твоему ENUM)
     db_status = 'ready' if action == 'done' else 'cancelled'
-    
-    # Текст для сообщения в Telegram
     status_display = "✅ Выполнен" if action == "done" else "❌ Отменен"
-    status_text = f"{status_display} ({user_name})"
+    status_line = f"\n\nСтатус: {status_display} ({user_name})"
     
-    # --- ОБНОВЛЕНИЕ В БД ---
+    # Обновляем БД
     conn = get_db_connection()
     if conn:
         try:
             cursor = conn.cursor()
-            # Записываем только то, что разрешено в ENUM
-            query = "UPDATE Orders SET status = %s WHERE order_id = %s"
-            cursor.execute(query, (db_status, order_id))
+            cursor.execute("UPDATE Orders SET status = %s WHERE order_id = %s", (db_status, order_id))
             conn.commit()
-        except Error as e:
-            print(f"Ошибка БД: {e}")
         finally:
             conn.close()
-    # -----------------------
 
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("⬅️ Вернуть в список (Назад)", callback_data=f"reset_{order_id}"))
 
+    # Редактируем сообщение (без parse_mode во избежание ошибок спецсимволов)
     bot.edit_message_text(
         chat_id=call.message.chat.id,
         message_id=call.message.message_id,
-        text=call.message.text + f"\n\n**СТАТУС:** {status_text}",
-        reply_markup=markup,
-        parse_mode="Markdown"
+        text=call.message.text + status_line,
+        reply_markup=markup
     )
 
-# Обработчик кнопки НАЗАД
 @bot.callback_query_handler(func=lambda call: call.data.startswith('reset_'))
 def handle_reset_order(call):
     order_id = call.data.split('_')[1]
     
-    # --- ОБНОВЛЕНИЕ В БД (Сброс на 'new') ---
     conn = get_db_connection()
     if conn:
         try:
             cursor = conn.cursor()
-            query = "UPDATE Orders SET status = 'new' WHERE order_id = %s"
-            cursor.execute(query, (order_id,))
+            cursor.execute("UPDATE Orders SET status = 'new' WHERE order_id = %s", (order_id,))
             conn.commit()
-        except Error as e:
-            print(f"Ошибка БД: {e}")
         finally:
             conn.close()
-    # -----------------------
 
     markup = types.InlineKeyboardMarkup()
-    btn_done = types.InlineKeyboardButton("✅ Готово", callback_data=f"done_{order_id}")
-    btn_cancel = types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_{order_id}")
-    markup.add(btn_done, btn_cancel)
+    markup.add(
+        types.InlineKeyboardButton("✅ Готово", callback_data=f"done_{order_id}"),
+        types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_{order_id}")
+    )
 
-    original_text = call.message.text.split("\n\n**СТАТУС:**")[0]
+    # Убираем приписку статуса
+    original_text = call.message.text.split("\n\nСтатус:")[0]
 
     bot.edit_message_text(
         chat_id=call.message.chat.id,
         message_id=call.message.message_id,
         text=original_text,
-        reply_markup=markup,
-        parse_mode="Markdown"
+        reply_markup=markup
     )
 
-# Авторизация
+# --- АВТОРИЗАЦИЯ ---
+
 @bot.message_handler(commands=['start'])
 def start(message):
-    bot.send_message(message.chat.id, "Введите пароль для доступа к заказам:")
+    bot.send_message(message.chat.id, "👋 Привет! Введите пароль для доступа к заказам:")
 
 @bot.message_handler(func=lambda message: message.text == PASSWORD)
 def auth(message):
     active_sessions.add(message.chat.id)
-    bot.send_message(message.chat.id, "✅ Авторизация успешна! Теперь вы получаете уведомления о заказах.")
+    bot.send_message(message.chat.id, "🔓 Доступ разрешен! Теперь вы будете получать новые заказы.")
 
-# Запуск мониторинга
+# --- ЗАПУСК ---
+
+def run_db_monitor():
+    while True:
+        check_new_orders()
+        time.sleep(5) # Проверка каждые 5 секунд
+
 if __name__ == '__main__':
-    print("Бот запущен...")
-    import threading
-
-    def run_polling():
-        while True:
-            try:
-                check_new_orders()
-                time.sleep(10) # Проверка каждые 10 секунд
-            except Exception as e:
-                print(f"Ошибка мониторинга: {e}")
-                time.sleep(5)
-
-    threading.Thread(target=run_polling, daemon=True).start()
+    print("Бот успешно запущен и мониторит базу...")
+    # Запускаем мониторинг в отдельном потоке
+    threading.Thread(target=run_db_monitor, daemon=True).start()
+    # Запускаем самого бота
     bot.polling(none_stop=True)
