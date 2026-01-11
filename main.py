@@ -23,44 +23,49 @@ DB_CONFIG = {
 
 bot = telebot.TeleBot(TOKEN)
 active_sessions = set() 
-admin_messages = {}     # {order_id: {admin_id: message_id}}
+admin_messages = {} # Храним {order_id: {admin_id: message_id}}
 
 def get_db_connection():
     return mysql.connector.connect(**DB_CONFIG)
 
-def sync_status_update(order_id, new_status):
-    status_map = {
-        'new': '🆕 Новый',
-        'ready': '✅ Готов',
-        'cancelled': '❌ Отменён'
-    }
+def send_error_to_admins(error_text):
+    """Отправляет текст ошибки всем авторизованным админам"""
+    for admin_id in list(active_sessions):
+        try:
+            bot.send_message(admin_id, f"⚠️ **СИСТЕМНАЯ ОШИБКА:**\n`{error_text}`", parse_mode="Markdown")
+        except:
+            pass
+
+def sync_status_update(order_id, new_status, cocktail_name, username, comment):
+    """Обновляет сообщение у всех админов"""
+    status_map = {'new': '🆕 Новый', 'ready': '✅ Готов', 'cancelled': '❌ Отменён'}
     status_text = status_map.get(new_status, new_status)
     
+    text = (f"📦 *ЗАКАЗ №{order_id}*\n"
+            f"🍹 *Коктейль:* {cocktail_name}\n"
+            f"👤 *Клиент:* @{username}\n"
+            f"📝 *Коммент:* {comment}\n"
+            f"📊 *Статус:* {status_text}")
+
     if order_id in admin_messages:
         for admin_id, msg_id in admin_messages[order_id].items():
             try:
-                bot.edit_message_text(
-                    chat_id=admin_id,
-                    message_id=msg_id,
-                    text=f"📢 Заказ №{order_id} обновлен!\n📊 Статус: {status_text}",
-                    reply_markup=None
-                )
-            except Exception as e:
-                print(f"Ошибка синхронизации: {e}")
+                bot.edit_message_text(chat_id=admin_id, message_id=msg_id, text=text, reply_markup=None, parse_mode="Markdown")
+            except:
+                pass
+
+# --- МОНИТОРИНГ ---
 
 def monitor():
-    global active_sessions, last_order_id
-    print("--- СИСТЕМА МОНИТОРИНГА ЗАПУЩЕНА ---")
-    
+    global active_sessions
+    print("Мониторинг запущен")
     while True:
-        # Важно: проверяем, ввел ли кто-то пароль
         if len(active_sessions) > 0:
             conn = None
             try:
                 conn = get_db_connection()
                 cursor = conn.cursor(dictionary=True)
                 
-                # Проверяем только необработанные заказы
                 query = """
                     SELECT o.order_id, o.status, o.comment, u.tg_username, c.name as c_name 
                     FROM Orders o 
@@ -71,16 +76,16 @@ def monitor():
                 cursor.execute(query)
                 new_orders = cursor.fetchall()
 
-                if new_orders:
-                    print(f"Найдено новых заказов: {len(new_orders)}")
-
                 for order in new_orders:
                     oid = order['order_id']
+                    c_name = order['c_name'] or "Неизвестно"
+                    uname = order['tg_username'] or "N/A"
+                    comm = order['comment'] or "-"
                     
                     text = (f"📦 *ЗАКАЗ №{oid}*\n"
-                            f"🍹 *Коктейль:* {order['c_name']}\n"
-                            f"👤 *Клиент:* @{order['tg_username'] or 'N/A'}\n"
-                            f"📝 *Коммент:* {order['comment'] or '-'}\n"
+                            f"🍹 *Коктейль:* {c_name}\n"
+                            f"👤 *Клиент:* @{uname}\n"
+                            f"📝 *Коммент:* {comm}\n"
                             f"📊 *Статус:* 🆕 Новый")
                     
                     markup = types.InlineKeyboardMarkup(row_width=2)
@@ -89,51 +94,75 @@ def monitor():
                         types.InlineKeyboardButton("❌ Отменить", callback_data=f"conf_cancel_{oid}")
                     )
                     
-                    if oid not in admin_messages:
-                        admin_messages[oid] = {}
+                    if oid not in admin_messages: admin_messages[oid] = {}
 
-                    # Рассылка всем авторизованным
                     for admin_id in list(active_sessions):
                         try:
                             msg = bot.send_message(admin_id, text, reply_markup=markup, parse_mode="Markdown")
                             admin_messages[oid][admin_id] = msg.message_id
-                        except Exception as e:
-                            print(f"Не удалось отправить админу {admin_id}: {e}")
+                        except: pass
 
-                    # Помечаем в БД, что оповещение отправлено
                     cursor.execute("UPDATE Orders SET is_notified = 1 WHERE order_id = %s", (oid,))
                     conn.commit()
-                    print(f"Заказ №{oid} успешно обработан.")
 
                 cursor.close()
                 conn.close()
-            except Exception as e:
-                print(f"!!! ОШИБКА БД В МОНИТОРИНГЕ !!!")
-                print(traceback.format_exc())
+            except Exception:
+                err = traceback.format_exc()
+                print(err)
+                send_error_to_admins(err) # Шлем ошибку в ТГ
                 if conn: conn.close()
-        else:
-            # Если это сообщение спамит в консоль, можно закомментировать
-            print("Ожидание авторизации админа (введите пароль в боте)...")
         
         time.sleep(20)
+
+# --- КНОПКИ ---
+
+@bot.callback_query_handler(func=lambda call: True)
+def handle_query(call):
+    data = call.data.split('_')
+    action, state, oid = data[0], data[1], data[2]
+
+    if action == "conf":
+        confirm_markup = types.InlineKeyboardMarkup()
+        confirm_markup.add(
+            types.InlineKeyboardButton("Да, уверен", callback_data=f"set_{state}_{oid}"),
+            types.InlineKeyboardButton("Назад", callback_data=f"back_{oid}")
+        )
+        bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=confirm_markup)
+
+    elif action == "set":
+        db_status = 'ready' if state == 'ready' else 'cancelled'
+        conn = None
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor(dictionary=True)
+            # Получаем данные для обновления текста у всех
+            cursor.execute("SELECT o.*, u.tg_username, c.name FROM Orders o LEFT JOIN Users u ON o.user_id = u.user_id LEFT JOIN Cocktails c ON o.cocktail_id = c.id WHERE o.order_id = %s", (oid,))
+            order = cursor.fetchone()
+            
+            cursor.execute("UPDATE Orders SET status = %s WHERE order_id = %s", (db_status, oid))
+            conn.commit()
+            
+            sync_status_update(oid, db_status, order['name'], order['tg_username'], order['comment'])
+            conn.close()
+        except Exception:
+            send_error_to_admins(traceback.format_exc())
+            if conn: conn.close()
+
+    elif action == "back":
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            types.InlineKeyboardButton("✅ Применить", callback_data=f"conf_ready_{oid}"),
+            types.InlineKeyboardButton("❌ Отменить", callback_data=f"conf_cancel_{oid}")
+        )
+        bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=markup)
 
 @bot.message_handler(func=lambda m: m.text == PASSWORD_PHRASE)
 def auth(message):
     global active_sessions
     active_sessions.add(message.chat.id)
-    print(f"Админ {message.chat.id} авторизован.")
-    bot.send_message(message.chat.id, "🔓 Доступ разрешен! Ожидайте новые заказы.")
-
-@bot.callback_query_handler(func=lambda call: True)
-def handle_query(call):
-    # Код обработки кнопок (conf/set/back) оставляем из предыдущего сообщения
-    # ... (обязательно скопируй его из прошлого ответа полностью) ...
-    pass # Замени на логику из прошлого сообщения
+    bot.send_message(message.chat.id, "🔓 Доступ разрешен! Ошибки и заказы будут приходить сюда.")
 
 if __name__ == '__main__':
-    # Запускаем мониторинг строго ПЕРЕД запуском бота
-    t = threading.Thread(target=monitor, daemon=True)
-    t.start()
-    
-    print("Бот запущен и ожидает сообщений...")
+    threading.Thread(target=monitor, daemon=True).start()
     bot.infinity_polling()
