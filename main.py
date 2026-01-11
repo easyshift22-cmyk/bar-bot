@@ -97,23 +97,40 @@ def check_new_orders():
         conn.close()
 
 # Обработчик кнопок Готово/Отмена
-# Обработчик кнопок Готово/Отмена
 @bot.callback_query_handler(func=lambda call: call.data.startswith(('done_', 'cancel_')))
 def handle_order_action(call):
     action, order_id = call.data.split('_')
     
-    # Получаем имя того, кто нажал на кнопку
+    # Имя для Telegram (оставляем для красоты в чате)
     user_name = call.from_user.first_name
     if call.from_user.last_name:
         user_name += f" {call.from_user.last_name}"
     
-    status_text = f"✅ Выполнен ({user_name})" if action == "done" else f"❌ Отменен ({user_name})"
+    # Определяем значение ДЛЯ БАЗЫ (согласно твоему ENUM)
+    db_status = 'ready' if action == 'done' else 'cancelled'
     
-    # Кнопка НАЗАД (чтобы можно было откатить действие)
+    # Текст для сообщения в Telegram
+    status_display = "✅ Выполнен" if action == "done" else "❌ Отменен"
+    status_text = f"{status_display} ({user_name})"
+    
+    # --- ОБНОВЛЕНИЕ В БД ---
+    conn = get_db_connection()
+    if conn:
+        try:
+            cursor = conn.cursor()
+            # Записываем только то, что разрешено в ENUM
+            query = "UPDATE Orders SET status = %s WHERE order_id = %s"
+            cursor.execute(query, (db_status, order_id))
+            conn.commit()
+        except Error as e:
+            print(f"Ошибка БД: {e}")
+        finally:
+            conn.close()
+    # -----------------------
+
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("⬅️ Вернуть в список (Назад)", callback_data=f"reset_{order_id}"))
 
-    # Редактируем сообщение, добавляя статус и имя админа
     bot.edit_message_text(
         chat_id=call.message.chat.id,
         message_id=call.message.message_id,
@@ -122,18 +139,30 @@ def handle_order_action(call):
         parse_mode="Markdown"
     )
 
-# Обработчик кнопки НАЗАД (возвращает заказ в работу)
+# Обработчик кнопки НАЗАД
 @bot.callback_query_handler(func=lambda call: call.data.startswith('reset_'))
 def handle_reset_order(call):
     order_id = call.data.split('_')[1]
     
-    # Возвращаем исходные кнопки управления
+    # --- ОБНОВЛЕНИЕ В БД (Сброс на 'new') ---
+    conn = get_db_connection()
+    if conn:
+        try:
+            cursor = conn.cursor()
+            query = "UPDATE Orders SET status = 'new' WHERE order_id = %s"
+            cursor.execute(query, (order_id,))
+            conn.commit()
+        except Error as e:
+            print(f"Ошибка БД: {e}")
+        finally:
+            conn.close()
+    # -----------------------
+
     markup = types.InlineKeyboardMarkup()
     btn_done = types.InlineKeyboardButton("✅ Готово", callback_data=f"done_{order_id}")
     btn_cancel = types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_{order_id}")
     markup.add(btn_done, btn_cancel)
 
-    # Очищаем текст от приписки о статусе
     original_text = call.message.text.split("\n\n**СТАТУС:**")[0]
 
     bot.edit_message_text(
