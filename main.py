@@ -14,6 +14,7 @@ DB_CONFIG = {
     'password': 'EasyShift123321',
     'host': '77.222.40.251',
     'database': 'easyshift2',
+    'charset': 'utf8mb4',
     'port': 3308
 }
 
