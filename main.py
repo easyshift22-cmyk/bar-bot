@@ -97,15 +97,23 @@ def check_new_orders():
         conn.close()
 
 # Обработчик кнопок Готово/Отмена
+# Обработчик кнопок Готово/Отмена
 @bot.callback_query_handler(func=lambda call: call.data.startswith(('done_', 'cancel_')))
 def handle_order_action(call):
     action, order_id = call.data.split('_')
-    status_text = "✅ Выполнен" if action == "done" else "❌ Отменен"
     
-    # Кнопка НАЗАД
+    # Получаем имя того, кто нажал на кнопку
+    user_name = call.from_user.first_name
+    if call.from_user.last_name:
+        user_name += f" {call.from_user.last_name}"
+    
+    status_text = f"✅ Выполнен ({user_name})" if action == "done" else f"❌ Отменен ({user_name})"
+    
+    # Кнопка НАЗАД (чтобы можно было откатить действие)
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("⬅️ Вернуть в список (Назад)", callback_data=f"reset_{order_id}"))
 
+    # Редактируем сообщение, добавляя статус и имя админа
     bot.edit_message_text(
         chat_id=call.message.chat.id,
         message_id=call.message.message_id,
@@ -119,13 +127,13 @@ def handle_order_action(call):
 def handle_reset_order(call):
     order_id = call.data.split('_')[1]
     
-    # Возвращаем исходные кнопки (Готово/Отмена)
+    # Возвращаем исходные кнопки управления
     markup = types.InlineKeyboardMarkup()
     btn_done = types.InlineKeyboardButton("✅ Готово", callback_data=f"done_{order_id}")
     btn_cancel = types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_{order_id}")
     markup.add(btn_done, btn_cancel)
 
-    # Убираем приписку статуса (просто берем текст до разделителя статуса)
+    # Очищаем текст от приписки о статусе
     original_text = call.message.text.split("\n\n**СТАТУС:**")[0]
 
     bot.edit_message_text(
