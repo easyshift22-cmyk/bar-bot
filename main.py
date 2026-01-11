@@ -31,6 +31,28 @@ def get_db_connection():
         print(f"Ошибка подключения к БД: {e}")
         return None
 
+# --- ФУНКЦИЯ СОЗДАНИЯ КЛАВИАТУРЫ (чтобы код не дублировать) ---
+def get_order_markup(order_id, status='new'):
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    
+    if status == 'new':
+        btn_cook = types.InlineKeyboardButton("👨‍🍳 В процессе", callback_data=f"cook_{order_id}")
+        btn_done = types.InlineKeyboardButton("✅ Готово", callback_data=f"done_{order_id}")
+        btn_cancel = types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_{order_id}")
+        markup.add(btn_cook, btn_done, btn_cancel)
+    elif status == 'cooking':
+        btn_done = types.InlineKeyboardButton("✅ Готово", callback_data=f"done_{order_id}")
+        btn_cancel = types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_{order_id}")
+        markup.add(btn_done, btn_cancel)
+    else: # ready или cancelled
+        btn_reset = types.InlineKeyboardButton("⬅️ Вернуть в список", callback_data=f"reset_{order_id}")
+        markup.add(btn_reset)
+    
+    # Кнопка ОБНОВИТЬ всегда внизу
+    btn_refresh = types.InlineKeyboardButton("🔄 Обновить статус", callback_data=f"refresh_{order_id}")
+    markup.add(btn_refresh)
+    return markup
+
 # --- ЛОГИКА МОНИТОРИНГА НОВЫХ ЗАКАЗОВ ---
 def check_new_orders():
     conn = get_db_connection()
@@ -71,13 +93,8 @@ def check_new_orders():
                 f"📜 СОСТАВ:\n{ing_text}"
             )
 
-            # Кнопки при первом появлении заказа
-            markup = types.InlineKeyboardMarkup(row_width=2)
-            markup.add(
-                types.InlineKeyboardButton("👨‍🍳 В процессе", callback_data=f"cook_{order['order_id']}"),
-                types.InlineKeyboardButton("✅ Готово", callback_data=f"done_{order['order_id']}"),
-                types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_{order['order_id']}")
-            )
+            # Создаем клавиатуру со статусом 'new'
+            markup = get_order_markup(order['order_id'], 'new')
 
             for admin_id in list(active_sessions):
                 try:
@@ -111,7 +128,6 @@ def handle_order_action(call):
     }
     db_status, display_status = status_map[action]
     
-    # 1. Запись в БД
     conn = get_db_connection()
     if conn:
         try:
@@ -122,27 +138,18 @@ def handle_order_action(call):
         finally:
             conn.close()
 
-    # 2. Обновление кнопок в зависимости от действия
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    if action == 'cook':
-        markup.add(
-            types.InlineKeyboardButton("✅ Готово", callback_data=f"done_{order_id}"),
-            types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_{order_id}"),
-            types.InlineKeyboardButton("🔄 Обновить", callback_data=f"refresh_{order_id}")
-        )
-    else:
-        markup.add(
-            types.InlineKeyboardButton("⬅️ Назад", callback_data=f"reset_{order_id}"),
-            types.InlineKeyboardButton("🔄 Обновить", callback_data=f"refresh_{order_id}")
-        )
-    
+    # Формируем обновленный текст и кнопки
     status_line = f"\n\nСтатус: {display_status} ({user_name})"
     clean_text = call.message.text.split("\n\nСтатус:")[0]
+    markup = get_order_markup(order_id, db_status)
     
-    bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, 
-                          text=clean_text + status_line, reply_markup=markup)
+    try:
+        bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, 
+                              text=clean_text + status_line, reply_markup=markup)
+    except:
+        bot.answer_callback_query(call.id, "Статус обновлен!")
 
-# --- КНОПКА "ОБНОВИТЬ" (Проверка статуса из БД) ---
+# --- КНОПКА "ОБНОВИТЬ" (теперь она всегда в markup) ---
 @bot.callback_query_handler(func=lambda call: call.data.startswith('refresh_'))
 def handle_refresh(call):
     order_id = call.data.split('_')[1]
@@ -160,28 +167,18 @@ def handle_refresh(call):
                 worker = order_data['worker_name'] or "Никто"
                 
                 status_line = f"\n\nСтатус: {cur_status} ({worker})"
-                new_text = call.message.text.split("\n\nСтатус:")[0] + status_line
+                clean_text = call.message.text.split("\n\nСтатус:")[0]
+                new_text = clean_text + status_line
+                
+                # Обновляем кнопки в зависимости от того, что в базе
+                markup = get_order_markup(order_id, order_data['status'])
                 
                 if new_text == call.message.text:
-                    bot.answer_callback_query(call.id, "Изменений нет")
+                    bot.answer_callback_query(call.id, f"Изменений нет. Статус: {cur_status}")
                 else:
-                    # Динамически меняем кнопки при обновлении
-                    markup = types.InlineKeyboardMarkup(row_width=2)
-                    if order_data['status'] == 'cooking':
-                        markup.add(types.InlineKeyboardButton("✅ Готово", callback_data=f"done_{order_id}"),
-                                   types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_{order_id}"),
-                                   types.InlineKeyboardButton("🔄 Обновить", callback_data=f"refresh_{order_id}"))
-                    elif order_data['status'] in ['ready', 'cancelled']:
-                        markup.add(types.InlineKeyboardButton("⬅️ Назад", callback_data=f"reset_{order_id}"),
-                                   types.InlineKeyboardButton("🔄 Обновить", callback_data=f"refresh_{order_id}"))
-                    else: # 'new'
-                        markup.add(types.InlineKeyboardButton("👨‍🍳 В процессе", callback_data=f"cook_{order_id}"),
-                                   types.InlineKeyboardButton("✅ Готово", callback_data=f"done_{order_id}"),
-                                   types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_{order_id}"))
-
                     bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, 
                                           text=new_text, reply_markup=markup)
-                    bot.answer_callback_query(call.id, "Статус обновлен!")
+                    bot.answer_callback_query(call.id, "Статус синхронизирован с базой!")
         finally:
             conn.close()
 
@@ -198,14 +195,11 @@ def handle_reset_order(call):
         finally:
             conn.close()
 
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        types.InlineKeyboardButton("👨‍🍳 В процессе", callback_data=f"cook_{order_id}"),
-        types.InlineKeyboardButton("✅ Готово", callback_data=f"done_{order_id}"),
-        types.InlineKeyboardButton("❌ Отмена", callback_data=f"cancel_{order_id}")
-    )
+    clean_text = call.message.text.split("\n\nСтатус:")[0]
+    markup = get_order_markup(order_id, 'new')
+    
     bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, 
-                          text=call.message.text.split("\n\nСтатус:")[0], reply_markup=markup)
+                          text=clean_text, reply_markup=markup)
 
 # --- АВТОРИЗАЦИЯ И ЗАПУСК ---
 @bot.message_handler(commands=['start'])
