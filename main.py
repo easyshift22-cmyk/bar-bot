@@ -73,7 +73,7 @@ def monitor():
                     
                     markup = types.InlineKeyboardMarkup(row_width=2)
                     markup.add(
-                        types.InlineKeyboardButton("✅ Применить", callback_data=f"conf_ready_{oid}"),
+                        types.InlineKeyboardButton("✅ Принять", callback_data=f"conf_ready_{oid}"),
                         types.InlineKeyboardButton("❌ Отменить", callback_data=f"conf_cancel_{oid}")
                     )
                     
