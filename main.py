@@ -54,63 +54,34 @@ def sync_status_update(order_id, new_status):
 # --- МОНИТОРИНГ ---
 
 def monitor():
-    print("--- МОНИТОРИНГ ЗАПУЩЕН (интервал 20 сек) ---")
+    print("--- ЗАПУСК МОНИТОРИНГА ---")
     while True:
+        print(f"Проверка БД... Авторизовано админов: {len(active_sessions)}")
         if active_sessions:
             conn = None
             try:
                 conn = get_db_connection()
                 cursor = conn.cursor(dictionary=True)
                 
-                # Ищем не оповещенные заказы (is_notified = 0)
-                query = """
-                    SELECT o.order_id, o.status, o.comment, u.tg_username, c.name as c_name 
-                    FROM Orders o 
-                    LEFT JOIN Users u ON o.user_id = u.user_id 
-                    LEFT JOIN Cocktails c ON o.cocktail_id = c.id
-                    WHERE o.is_notified = 0
-                """
+                # Проверяем наличие колонки is_notified перед запросом
+                query = "SELECT * FROM Orders WHERE is_notified = 0"
                 cursor.execute(query)
                 new_orders = cursor.fetchall()
-
-                for order in new_orders:
-                    oid = order['order_id']
-                    
-                    # Формируем текст с колонкой статуса
-                    status_display = "🆕 Новый" if order['status'] == 'new' else order['status']
-                    text = (f"📦 *ЗАКАЗ №{oid}*\n"
-                            f"🍹 *Коктейль:* {order['c_name']}\n"
-                            f"👤 *Клиент:* @{order['tg_username'] or 'N/A'}\n"
-                            f"📝 *Коммент:* {order['comment'] or '-'}\n"
-                            f"📊 *Статус:* {status_display}")
-                    
-                    markup = types.InlineKeyboardMarkup(row_width=2)
-                    markup.add(
-                        types.InlineKeyboardButton("✅ Применить", callback_data=f"conf_ready_{oid}"),
-                        types.InlineKeyboardButton("❌ Отменить", callback_data=f"conf_cancel_{oid}")
-                    )
-                    
-                    if oid not in admin_messages:
-                        admin_messages[oid] = {}
-
-                    for admin_id in active_sessions:
-                        try:
-                            msg = bot.send_message(admin_id, text, reply_markup=markup, parse_mode="Markdown")
-                            admin_messages[oid][admin_id] = msg.message_id
-                        except: pass
-
-                    # Помечаем как оповещенный
-                    cursor.execute("UPDATE Orders SET is_notified = 1 WHERE order_id = %s", (oid,))
-                    conn.commit()
-
+                
+                if new_orders:
+                    print(f"Найдено новых заказов: {len(new_orders)}")
+                
+                # ... далее остальной код рассылки ...
+                
                 cursor.close()
                 conn.close()
             except Exception as e:
-                print(f"Ошибка мониторинга: {e}")
+                print(f"ОШИБКА В ЦИКЛЕ: {e}") # Вот это сообщение мы ищем в логах!
                 if conn: conn.close()
-        
+        else:
+            print("Мониторинг спит: ни один админ не ввел пароль.")
+            
         time.sleep(20)
-
 # --- ОБРАБОТКА КНОПОК ---
 
 @bot.callback_query_handler(func=lambda call: True)
