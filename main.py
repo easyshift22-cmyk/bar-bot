@@ -17,6 +17,7 @@ DB_CONFIG = {
     'database': 'easyshift2',
     'port': 3308,
     'charset': 'utf8mb4', # Исправляет "??????"
+    'collation': 'utf8mb4_unicode_ci'
     'use_unicode': True
 }
 
