@@ -6,7 +6,7 @@ from telebot import types
 from mysql.connector import Error
 
 # --- НАСТРОЙКИ ---
-TOKEN = '8285671558:AAHsrgoANT0OjE4yy1G_frBktvkkdUauT-Y' 
+TOKEN = '8112243924:AAGv-nqJx-ld1oKm8fEQGk0-1J9eWs0A0Nk' 
 bot = telebot.TeleBot(TOKEN)
 
 DB_CONFIG = {
