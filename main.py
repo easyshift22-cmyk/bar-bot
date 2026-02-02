@@ -31,7 +31,7 @@ def get_db_connection():
         print(f"Ошибка подключения к БД: {e}")
         return None
 
-# --- ФУНКЦИЯ СОЗДАНИЯ КЛАВИАТУРЫ (чтобы код не дублировать) ---
+# --- ФУНКЦИЯ СОЗДАНИЯ КЛАВИАТУРЫ ---
 def get_order_markup(order_id, status='new'):
     markup = types.InlineKeyboardMarkup(row_width=2)
     
@@ -48,7 +48,11 @@ def get_order_markup(order_id, status='new'):
         btn_reset = types.InlineKeyboardButton("⬅️ Вернуть в список", callback_data=f"reset_{order_id}")
         markup.add(btn_reset)
     
-    # Кнопка ОБНОВИТЬ всегда внизу
+    # Кнопка комментария доступна для активных заказов
+    if status in ['new', 'cooking']:
+        btn_comment = types.InlineKeyboardButton("💬 Коммент бармена", callback_data=f"comment_{order_id}")
+        markup.add(btn_comment)
+
     btn_refresh = types.InlineKeyboardButton("🔄 Обновить статус", callback_data=f"refresh_{order_id}")
     markup.add(btn_refresh)
     return markup
@@ -58,11 +62,10 @@ def check_new_orders():
     conn = get_db_connection()
     if not conn:
         return
-
     try:
         cursor = conn.cursor(dictionary=True)
         query = """
-            SELECT o.order_id, c.name as cocktail_name, o.quantity, o.comment,
+            SELECT o.order_id, c.name as cocktail_name, o.quantity, o.comment, o.BarmanComment,
                    i.ing_1, i.qty_1, i.ing_2, i.qty_2, i.ing_3, i.qty_3,
                    i.ing_4, i.qty_4, i.ing_5, i.qty_5, i.ing_6, i.qty_6
             FROM Orders o
@@ -82,28 +85,26 @@ def check_new_orders():
                     ingredients.append(f"  🔹 {name}: {qty}")
             
             ing_text = "\n".join(ingredients) if ingredients else "  Состав не указан"
+            b_comment = f"\n📝 **Бармен:** {order['BarmanComment']}" if order['BarmanComment'] else ""
 
             msg_text = (
                 f"🆕 НОВЫЙ ЗАКАЗ №{order['order_id']}\n"
                 f"━━━━━━━━━━━━━━\n"
                 f"🍸 Коктейль: {order['cocktail_name']}\n"
                 f"🔢 Количество: {order['quantity']}\n"
-                f"💬 Коммент: {order['comment'] if order['comment'] else '---'}\n"
+                f"💬 Клиент: {order['comment'] if order['comment'] else '---'}"
+                f"{b_comment}\n"
                 f"━━━━━━━━━━━━━━\n"
                 f"📜 СОСТАВ:\n{ing_text}"
             )
 
-            # Создаем клавиатуру со статусом 'new'
             markup = get_order_markup(order['order_id'], 'new')
-
             for admin_id in list(active_sessions):
                 try:
-                    bot.send_message(admin_id, msg_text, reply_markup=markup)
+                    bot.send_message(admin_id, msg_text, reply_markup=markup, parse_mode="Markdown")
                 except:
                     pass
-
             cursor.execute("UPDATE Orders SET is_notified = 1 WHERE order_id = %s", (order['order_id'],))
-        
         conn.commit()
     except Error as e:
         print(f"Ошибка мониторинга: {e}")
@@ -112,20 +113,42 @@ def check_new_orders():
             cursor.close()
             conn.close()
 
-# --- ОБРАБОТЧИКИ КНОПОК ДЕЙСТВИЯ ---
+# --- ОБРАБОТЧИК КНОПКИ "ДОБАВИТЬ КОММЕНТАРИЙ" ---
+@bot.callback_query_handler(func=lambda call: call.data.startswith('comment_'))
+def handle_add_comment(call):
+    order_id = call.data.split('_')[1]
+    msg = bot.send_message(call.message.chat.id, f"📝 Введите комментарий для заказа №{order_id}:")
+    # Регистрируем следующий шаг: бот будет ждать текст
+    bot.register_next_step_handler(msg, process_barman_comment, order_id, call.message.message_id)
+    bot.answer_callback_query(call.id)
 
+def process_barman_comment(message, order_id, original_msg_id):
+    comment_text = message.text
+    conn = get_db_connection()
+    if conn:
+        try:
+            cursor = conn.cursor()
+            query = "UPDATE Orders SET BarmanComment = %s WHERE order_id = %s"
+            cursor.execute(query, (comment_text, order_id))
+            conn.commit()
+            bot.reply_to(message, f"✅ Комментарий к заказу №{order_id} сохранен!")
+            
+            # Предлагаем пользователю обновить статус сообщения, чтобы увидеть изменения
+            bot.send_message(message.chat.id, "Нажмите кнопку '🔄 Обновить статус' на заказе, чтобы отобразить комментарий.")
+        except Error as e:
+            bot.reply_to(message, "❌ Ошибка при сохранении в базу.")
+            print(f"Ошибка БД: {e}")
+        finally:
+            conn.close()
+
+# --- ОБРАБОТЧИКИ КНОПОК ДЕЙСТВИЯ ---
 @bot.callback_query_handler(func=lambda call: call.data.startswith(('done_', 'cancel_', 'cook_')))
 def handle_order_action(call):
     data = call.data.split('_')
     action, order_id = data[0], data[1]
-    
     user_name = call.from_user.first_name + (f" {call.from_user.last_name}" if call.from_user.last_name else "")
     
-    status_map = {
-        'done': ('ready', '✅ Выполнен'),
-        'cancel': ('cancelled', '❌ Отменен'),
-        'cook': ('cooking', '👨‍🍳 В процессе')
-    }
+    status_map = {'done': ('ready', '✅ Выполнен'), 'cancel': ('cancelled', '❌ Отменен'), 'cook': ('cooking', '👨‍🍳 В процессе')}
     db_status, display_status = status_map[action]
     
     conn = get_db_connection()
@@ -138,7 +161,6 @@ def handle_order_action(call):
         finally:
             conn.close()
 
-    # Формируем обновленный текст и кнопки
     status_line = f"\n\nСтатус: {display_status} ({user_name})"
     clean_text = call.message.text.split("\n\nСтатус:")[0]
     markup = get_order_markup(order_id, db_status)
@@ -149,16 +171,15 @@ def handle_order_action(call):
     except:
         bot.answer_callback_query(call.id, "Статус обновлен!")
 
-# --- КНОПКА "ОБНОВИТЬ" (теперь она всегда в markup) ---
+# --- КНОПКА "ОБНОВИТЬ" ---
 @bot.callback_query_handler(func=lambda call: call.data.startswith('refresh_'))
 def handle_refresh(call):
     order_id = call.data.split('_')[1]
-    
     conn = get_db_connection()
     if conn:
         try:
             cursor = conn.cursor(dictionary=True)
-            cursor.execute("SELECT status, worker_name FROM Orders WHERE order_id = %s", (order_id,))
+            cursor.execute("SELECT status, worker_name, BarmanComment FROM Orders WHERE order_id = %s", (order_id,))
             order_data = cursor.fetchone()
             
             if order_data:
@@ -166,19 +187,21 @@ def handle_refresh(call):
                 cur_status = labels.get(order_data['status'], order_data['status'])
                 worker = order_data['worker_name'] or "Никто"
                 
-                status_line = f"\n\nСтатус: {cur_status} ({worker})"
-                clean_text = call.message.text.split("\n\nСтатус:")[0]
-                new_text = clean_text + status_line
+                # Добавляем комментарий бармена в текст при обновлении, если он есть
+                b_comment = f"\n📝 **Бармен:** {order_data['BarmanComment']}" if order_data['BarmanComment'] else ""
                 
-                # Обновляем кнопки в зависимости от того, что в базе
+                # Собираем заново основной текст (до раздела Статус)
+                main_part = call.message.text.split("\n\nСтатус:")[0]
+                # Убираем старый комментарий бармена из текста, если он там был, чтобы не дублировать
+                if "📝 Бармен:" in main_part:
+                    main_part = main_part.split("\n📝 Бармен:")[0]
+
+                new_text = main_part + b_comment + f"\n\nСтатус: {cur_status} ({worker})"
                 markup = get_order_markup(order_id, order_data['status'])
                 
-                if new_text == call.message.text:
-                    bot.answer_callback_query(call.id, f"Изменений нет. Статус: {cur_status}")
-                else:
-                    bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, 
-                                          text=new_text, reply_markup=markup)
-                    bot.answer_callback_query(call.id, "Статус синхронизирован с базой!")
+                bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, 
+                                      text=new_text, reply_markup=markup, parse_mode="Markdown")
+                bot.answer_callback_query(call.id, "Данные обновлены!")
         finally:
             conn.close()
 
@@ -197,9 +220,8 @@ def handle_reset_order(call):
 
     clean_text = call.message.text.split("\n\nСтатус:")[0]
     markup = get_order_markup(order_id, 'new')
-    
     bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id, 
-                          text=clean_text, reply_markup=markup)
+                          text=clean_text, reply_markup=markup, parse_mode="Markdown")
 
 # --- АВТОРИЗАЦИЯ И ЗАПУСК ---
 @bot.message_handler(commands=['start'])
