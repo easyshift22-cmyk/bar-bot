@@ -80,20 +80,21 @@ def check_new_orders():
             ingredients = []
             for num in range(1, 7):
                 name, qty = order.get(f'ing_{num}'), order.get(f'qty_{num}')
-                if name and name.strip(): ingredients.append(f"  🔹 {name}: {qty}")
+                if name and name.strip(): 
+                    ingredients.append(f"  🔹 {name}: {qty}")
             
+            # Выносим объединение строк ЗА ПРЕДЕЛЫ f-строки
             ing_text = "\n".join(ingredients) if ingredients else "  Состав не указан"
             b_comment = f"\n📝 **Бармен:** {order['BarmanComment']}" if order['BarmanComment'] else ""
             
-            # Формируем данные клиента
             client_info = f"{order['username']} (tg: @{order['tg_username']})" if order['username'] else "Неизвестен"
 
             msg_text = (
                 f"🆕 НОВЫЙ ЗАКАЗ №{order['order_id']}\n"
                 f"━━━━━━━━━━━━━━\n"
                 f"👤 Клиент: {client_info}\n"
-                f"🍸 Коктейль: {order['cocktail_name']} ({order['CocktailType'] or 'Без типа'})\n"
-                f"🥤 Тара: {order['glassware'] or 'Не указана'}\n"
+                f"🍸 Коктейль: {order['cocktail_name']} ({order['CocktailType'] or '---'})\n"
+                f"🥤 Тара: {order['glassware'] or '---'}\n"
                 f"🔢 Количество: {order['quantity']}\n"
                 f"💬 Коммент клиента: {order['comment'] if order['comment'] else '---'}"
                 f"{b_comment}\n"
@@ -120,7 +121,6 @@ def handle_add_comment(call):
     bot.answer_callback_query(call.id)
 
 def process_barman_comment(message, order_id):
-    # Добавляем никнейм в скобках (берем username или имя, если юзернейма нет)
     nick = message.from_user.username or message.from_user.first_name
     full_comment = f"{message.text} ({nick})"
     
@@ -131,7 +131,7 @@ def process_barman_comment(message, order_id):
             query = "UPDATE Orders SET BarmanComment = %s WHERE order_id = %s"
             cursor.execute(query, (full_comment, order_id))
             conn.commit()
-            bot.reply_to(message, "✅ Комментарий сохранен! Нажмите 'Обновить статус' в заказе.")
+            bot.reply_to(message, "✅ Комментарий сохранен! Обновите статус заказа.")
         except Error as e: bot.reply_to(message, "❌ Ошибка БД."); print(e)
         finally: conn.close()
 
@@ -161,8 +161,12 @@ def handle_refresh(call):
                 ingredients = []
                 for num in range(1, 7):
                     name, qty = order.get(f'ing_{num}'), order.get(f'qty_{num}')
-                    if name and name.strip(): ingredients.append(f"  🔹 {name}: {qty}")
+                    if name and name.strip(): 
+                        ingredients.append(f"  🔹 {name}: {qty}")
                 
+                # Собираем состав в переменную заранее (чтобы не было ошибки SyntaxError)
+                ing_list_str = "\n".join(ingredients) if ingredients else "Нет"
+
                 # Логика отображения статуса
                 labels = {'new': '🆕 Ожидает', 'cooking': '👨‍🍳 В процессе', 'ready': '✅ Выполнен', 'cancelled': '❌ Отменен'}
                 
@@ -184,7 +188,7 @@ def handle_refresh(call):
                     f"💬 Коммент клиента: {order['comment'] if order['comment'] else '---'}"
                     f"{b_comment}\n"
                     f"━━━━━━━━━━━━━━\n"
-                    f"📜 СОСТАВ:\n{'\n'.join(ingredients) if ingredients else 'Нет'}\n\n"
+                    f"📜 СОСТАВ:\n{ing_list_str}\n\n"
                     f"Статус: {status_display}"
                 )
 
@@ -193,7 +197,7 @@ def handle_refresh(call):
                 bot.answer_callback_query(call.id, "Обновлено")
         finally: conn.close()
 
-# --- ОБРАБОТЧИКИ КНОПОК ДЕЙСТВИЯ (ГОТОВО/ОТМЕНА/В ПРОЦЕССЕ) ---
+# --- ОБРАБОТЧИКИ КНОПОК ДЕЙСТВИЯ ---
 @bot.callback_query_handler(func=lambda call: call.data.startswith(('done_', 'cancel_', 'cook_')))
 def handle_order_action(call):
     action, order_id = call.data.split('_')
@@ -210,7 +214,6 @@ def handle_order_action(call):
             conn.commit()
         finally: conn.close()
     
-    # После действия сразу вызываем обновление сообщения
     handle_refresh(call)
 
 # --- КНОПКА "НАЗАД" ---
